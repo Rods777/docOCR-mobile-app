@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">docOCR</string>
+    <string name="underlined_upload"><u>Upload an Image</u></string>
+    <string name="underlined_capture"><u>Capture an Image</u></string>
+</resources>
