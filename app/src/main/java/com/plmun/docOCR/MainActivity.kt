@@ -3,6 +3,7 @@ package com.plmun.docOCR
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.res.AssetFileDescriptor
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -15,11 +16,14 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
-import com.plmun.docOCR.ml.OcrModelProductionFp16
-import org.tensorflow.lite.support.tensorbuffer.TensorBuffer
 import org.tensorflow.lite.DataType
+import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.support.tensorbuffer.TensorBuffer
+import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
 
 class MainActivity : ComponentActivity() {
 
@@ -27,9 +31,17 @@ class MainActivity : ComponentActivity() {
     private lateinit var txtUpload: TextView
     private lateinit var txtCapture: TextView
     private lateinit var txtResult: TextView
+    private lateinit var tflite: Interpreter
 
     companion object {
         private const val TAG = "MainActivity"
+        private const val IMAGE_WIDTH = 160
+        private const val IMAGE_HEIGHT = 64
+
+        // Characters exactly as in Python: string.ascii_letters + string.digits + " -'.,:"
+        private val CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -'.,:"
+
+        private const val BLANK_INDEX = 0  // Blank token is at index 0
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,6 +54,15 @@ class MainActivity : ComponentActivity() {
         txtCapture = findViewById(R.id.txt_capture)
         txtResult = findViewById(R.id.txt_result)
 
+        // Initialize TensorFlow Lite Interpreter
+        try {
+            tflite = Interpreter(loadModelFile())
+            Log.d(TAG, "✅ TensorFlow Lite Interpreter loaded successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to load TensorFlow Lite model", e)
+            Toast.makeText(this, "Failed to load OCR model", Toast.LENGTH_LONG).show()
+        }
+
         txtUpload.setOnClickListener {
             val intent = Intent(Intent.ACTION_PICK)
             intent.type = "image/*"
@@ -51,6 +72,21 @@ class MainActivity : ComponentActivity() {
         txtCapture.setOnClickListener {
             requestCameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        tflite.close()
+    }
+
+    private fun loadModelFile(): MappedByteBuffer {
+        val fileDescriptor: AssetFileDescriptor =
+            assets.openFd("ml/ocr_model_production_fp16.tflite")
+        val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
+        val fileChannel = inputStream.channel
+        val startOffset = fileDescriptor.startOffset
+        val declaredLength = fileDescriptor.declaredLength
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
     }
 
     private val requestCameraPermissionLauncher =
@@ -99,108 +135,138 @@ class MainActivity : ComponentActivity() {
         }
 
     // ----------------------------
-    // 🔥 RUN OCR MODEL HERE
+    // 🔥 RUN OCR MODEL HERE (USING RAW INTERPRETER)
     // ----------------------------
 
     private fun runOcr(bitmap: Bitmap) {
         try {
-            val resized = Bitmap.createScaledBitmap(bitmap, 160, 64, true)
-            val byteBuffer = convertBitmapToByteBuffer(resized)
+            Log.d(TAG, "STEP 1: runOcr started")
 
-            val model = OcrModelProductionFp16.newInstance(this)
+            val resized = Bitmap.createScaledBitmap(bitmap, IMAGE_WIDTH, IMAGE_HEIGHT, true)
+            Log.d(TAG, "STEP 2: Bitmap resized: ${resized.width}x${resized.height}")
 
-            // Create input tensor
-            val input = TensorBuffer.createFixedSize(intArrayOf(1, 64, 160, 1), DataType.FLOAT32)
-            input.loadBuffer(byteBuffer)
+            val inputBuffer = convertBitmapToByteBuffer(resized)
+            Log.d(TAG, "STEP 3: Input buffer size: ${inputBuffer.capacity()} bytes")
 
-            // Process the model
-            val outputs = model.process(input)
+            // Get model input and output details
+            val inputShape = tflite.getInputTensor(0).shape()
+            Log.d(TAG, "STEP 4: Model input shape: ${inputShape.contentToString()}")
 
-            // Get the output tensor - handle the larger output size (11040 bytes = 2760 floats)
-            val outputTensor = outputs.outputFeature0AsTensorBuffer
+            // 🔥 FIX: Force the correct output shape based on your Python model
+            // Your model should output [1, 40, 69] (time_steps = 40, num_classes = 69)
+            val expectedOutputShape = intArrayOf(1, 40, 69)
+            val outputBuffer = TensorBuffer.createFixedSize(expectedOutputShape, DataType.FLOAT32)
 
-            // The error suggests output should be 11040 bytes = 2760 float values (11040 / 4)
-            val result = outputTensor.floatArray
+            Log.d(
+                TAG,
+                "STEP 5: Using forced output shape: ${expectedOutputShape.contentToString()}"
+            )
+            Log.d(TAG, "STEP 6: Output buffer size: ${outputBuffer.flatSize} elements")
+            Log.d(TAG, "STEP 7: Output buffer bytes: ${outputBuffer.flatSize * 4} bytes")
 
-            Log.d(TAG, "Output tensor size: ${result.size} floats, ${result.size * 4} bytes")
+            // 🔥 FIX: Resize the interpreter output tensor
+            tflite.resizeInput(0, intArrayOf(1, IMAGE_HEIGHT, IMAGE_WIDTH, 1))
+            tflite.allocateTensors()
 
-            model.close()
+            // Run inference
+            Log.d(TAG, "STEP 8: Running inference...")
+            tflite.run(inputBuffer, outputBuffer.buffer.rewind())
+            Log.d(TAG, "STEP 9: Inference completed successfully")
 
-            // Convert output tensor → text
-            val ocrText = decodeOutput(result)
-            txtResult.text = ocrText
+            val ocrText = decodeOutput(outputBuffer, expectedOutputShape)
+            Log.d(TAG, "STEP 10: Decoded text = $ocrText")
+
+            txtResult.text = "Result: $ocrText"
 
         } catch (e: Exception) {
-            e.printStackTrace()
-            Toast.makeText(this, "OCR Error: ${e.message}", Toast.LENGTH_LONG).show()
-            txtResult.text = "Error: ${e.message}"
+            Log.e(TAG, "OCR Error", e)
+            runOnUiThread {
+                Toast.makeText(this, "OCR Error: ${e.message}", Toast.LENGTH_LONG).show()
+                txtResult.text = "Error: ${e.message}"
+            }
         }
     }
 
     // Convert Bitmap → ByteBuffer
     private fun convertBitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
-        val buffer = ByteBuffer.allocateDirect(1 * 64 * 160 * 1 * 4) // FLOAT32 = 4 bytes
+        val buffer = ByteBuffer.allocateDirect(1 * IMAGE_HEIGHT * IMAGE_WIDTH * 1 * 4)
         buffer.order(ByteOrder.nativeOrder())
 
-        val pixels = IntArray(64 * 160)
+        val pixels = IntArray(IMAGE_HEIGHT * IMAGE_WIDTH)
         bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
 
         for (pixel in pixels) {
-            // Convert to grayscale
-            val r = (pixel shr 16 and 0xFF) / 255.0f
-            val g = (pixel shr 8 and 0xFF) / 255.0f
-            val b = (pixel and 0xFF) / 255.0f
+            // This matches your Python: cv2.imread(..., IMREAD_GRAYSCALE)
+            val r = (pixel shr 16 and 0xFF)
+            val g = (pixel shr 8 and 0xFF)
+            val b = (pixel and 0xFF)
+
+            // This matches OpenCV's grayscale conversion
             val gray = (0.299f * r + 0.587f * g + 0.114f * b)
-            buffer.putFloat(gray)
+
+            // This matches your Python: img / 255.0
+            val normalized = gray / 255.0f
+
+            buffer.putFloat(normalized)
         }
         buffer.rewind()
         return buffer
     }
 
-    // MODEL-SPECIFIC DECODING - Updated for CTC output
-    private fun decodeOutput(arr: FloatArray): String {
-        if (arr.isEmpty()) return "No output"
+    // FLEXIBLE CTC DECODING
+    private fun decodeOutput(tensor: TensorBuffer, shape: IntArray): String {
+        val floatArray = tensor.floatArray
 
-        // For CTC models, the output is typically [batch_size, time_steps, num_classes]
-        // Your output has 2760 floats, which might be something like [1, 69, 40] or similar
+        Log.d(TAG, "DEBUG: Output shape = ${shape.contentToString()}")
+        Log.d(TAG, "DEBUG: Output elements = ${floatArray.size}")
 
-        Log.d(TAG, "Output array size: ${arr.size}")
+        // Handle the expected shape [1, 40, 69]
+        if (shape.size == 3 && shape[0] == 1 && shape[1] == 40 && shape[2] == 69) {
+            return decodeCtcOutput3D(floatArray, 40, 69)
+        } else {
+            return "Unexpected shape: ${shape.contentToString()}"
+        }
+    }
 
-        // Simple greedy decoding for CTC output
-        val characters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
-
-        // Assuming the output shape is [1, time_steps, num_classes]
-        // We need to find the time_steps and num_classes
-        val numClasses = characters.length + 1 // +1 for CTC blank
-        val timeSteps = arr.size / numClasses
-
-        Log.d(TAG, "Assuming timeSteps: $timeSteps, numClasses: $numClasses")
-
+    private fun decodeCtcOutput3D(floatArray: FloatArray, timeSteps: Int, numClasses: Int): String {
         val decodedText = StringBuilder()
-        var prevIndex = -1
+        var lastIndex = -1
 
-        for (t in 0 until timeSteps) {
-            var maxProb = -1.0f
+        Log.d(TAG, "DEBUG: Decoding $timeSteps time steps with $numClasses classes")
+
+        // Iterate through each time step
+        for (timeStep in 0 until timeSteps) {
             var maxIndex = -1
+            var maxValue = Float.MIN_VALUE
 
             // Find the character with highest probability at this time step
-            for (c in 0 until numClasses) {
-                val prob = arr[t * numClasses + c]
-                if (prob > maxProb) {
-                    maxProb = prob
-                    maxIndex = c
+            for (charIndex in 0 until numClasses) {
+                val arrayIndex = timeStep * numClasses + charIndex
+                if (arrayIndex < floatArray.size && floatArray[arrayIndex] > maxValue) {
+                    maxValue = floatArray[arrayIndex]
+                    maxIndex = charIndex
                 }
             }
 
-            // CTC decoding: skip blanks and repeated characters
-            if (maxIndex != numClasses - 1 && maxIndex != prevIndex) { // numClasses-1 is usually blank
-                if (maxIndex < characters.length) {
-                    decodedText.append(characters[maxIndex])
+            // CTC decoding: remove blanks and consecutive duplicates
+            if (maxIndex != BLANK_INDEX && maxIndex != lastIndex) {
+                // Convert character index to actual character
+                val charPos = maxIndex - 1
+                if (charPos >= 0 && charPos < CHARACTERS.length) {
+                    decodedText.append(CHARACTERS[charPos])
+                    Log.d(
+                        TAG,
+                        "DEBUG: Time step $timeStep -> char '${CHARACTERS[charPos]}' (index: $maxIndex)"
+                    )
+                } else if (maxIndex > 0) {
+                    Log.w(TAG, "Character index out of bounds: $charPos")
                 }
             }
-            prevIndex = maxIndex
+            lastIndex = maxIndex
         }
 
-        return if (decodedText.isNotEmpty()) decodedText.toString() else "No text detected"
+        val result = decodedText.toString()
+        Log.d(TAG, "DEBUG: Final decoded text = '$result'")
+        return result.ifEmpty { "No text detected" }
     }
 }
