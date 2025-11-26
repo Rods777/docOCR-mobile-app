@@ -155,31 +155,42 @@ class MainActivity : ComponentActivity() {
             val inputBuffer = convertBitmapToByteBuffer(resized)
             Log.d(TAG, "STEP 3: Input buffer size: ${inputBuffer.capacity()} bytes")
 
-            // Get model input and output details
-            val inputShape = tflite.getInputTensor(0).shape()
-            Log.d(TAG, "STEP 4: Model input shape: ${inputShape.contentToString()}")
+            // 🔥 SIMPLE FIX: Let TFLite handle output allocation automatically
+            val outputMap = HashMap<Int, Any>()
 
-            // 🔥 FIX: Force the correct output shape based on your Python model
-            // Your model should output [1, 40, 69] (time_steps = 40, num_classes = 69)
-            val outputShape = tflite.getOutputTensor(0).shape()
-            Log.d(TAG, "Actual output shape: ${outputShape.contentToString()}")
-            val outputBuffer = TensorBuffer.createFixedSize(outputShape, DataType.FLOAT32)
+            // Get output tensor to determine the shape
+            val outputTensor = tflite.getOutputTensor(0)
+            val outputShape = outputTensor.shape()
+            val outputDataType = outputTensor.dataType()
 
-            Log.d(TAG, "STEP 5: Using model output shape: ${outputShape.contentToString()}")
-            Log.d(TAG, "STEP 6: Output buffer size: ${outputBuffer.flatSize} elements")
-            Log.d(TAG, "STEP 7: Output buffer bytes: ${outputBuffer.flatSize * 4} bytes")
+            Log.d(TAG, "Output tensor shape: ${outputShape.contentToString()}")
+            Log.d(TAG, "Output tensor bytes: ${outputTensor.numBytes()}")
 
-            // 🔥 FIX: Resize the interpreter output tensor
-            tflite.resizeInput(0, intArrayOf(1, IMAGE_HEIGHT, IMAGE_WIDTH, 1))
-            tflite.allocateTensors()
+            // Create output array with correct size
+            val outputArray = Array(1) { Array(outputShape[1]) { FloatArray(outputShape[2]) } }
+            outputMap[0] = outputArray
+
+            Log.d(TAG, "STEP 4: Output array dimensions: ${outputArray.size}x${outputArray[0].size}x${outputArray[0][0].size}")
 
             // Run inference
-            Log.d(TAG, "STEP 8: Running inference...")
-            tflite.run(inputBuffer, outputBuffer.buffer.rewind())
-            Log.d(TAG, "STEP 9: Inference completed successfully")
+            Log.d(TAG, "STEP 5: Running inference...")
+            tflite.runForMultipleInputsOutputs(arrayOf<Any>(inputBuffer), outputMap)
+            Log.d(TAG, "STEP 6: Inference completed successfully")
 
-            val ocrText = decodeOutput(outputBuffer, outputShape)
-            Log.d(TAG, "STEP 10: Decoded text = $ocrText")
+            // Flatten the output for decoding
+            val flatOutput = FloatArray(outputShape[1] * outputShape[2])
+            var index = 0
+            for (i in outputArray[0].indices) {
+                for (j in outputArray[0][i].indices) {
+                    flatOutput[index++] = outputArray[0][i][j]
+                }
+            }
+
+            val tensorBuffer = TensorBuffer.createFixedSize(outputShape, DataType.FLOAT32)
+            tensorBuffer.loadArray(flatOutput)
+
+            val ocrText = decodeOutput(tensorBuffer, outputShape)
+            Log.d(TAG, "STEP 7: Decoded text = $ocrText")
 
             txtResult.text = "Result: $ocrText"
 
@@ -227,14 +238,51 @@ class MainActivity : ComponentActivity() {
         Log.d(TAG, "DEBUG: Output shape = ${shape.contentToString()}")
         Log.d(TAG, "DEBUG: Output elements = ${floatArray.size}")
 
-        // Handle any shape [1, timeSteps, numClasses]
-        if (shape.size == 3 && shape[0] == 1 && shape[2] == CHARACTERS.length + 1) {
+        // Handle the actual shape [1, 1, 69] - only 1 time step
+        if (shape.size == 3 && shape[0] == 1 && shape[1] == 1 && shape[2] == 69) {
+            return decodeSingleCharacter(floatArray)
+        }
+        // Handle multiple time steps [1, timeSteps, 69]
+        else if (shape.size == 3 && shape[0] == 1 && shape[2] == 69) {
             val timeSteps = shape[1]
             val numClasses = shape[2]
             return decodeCtcOutput3D(floatArray, timeSteps, numClasses)
         } else {
             return "Unexpected shape: ${shape.contentToString()}"
         }
+    }
+
+    private fun decodeSingleCharacter(floatArray: FloatArray): String {
+        var maxIndex = -1
+        var maxValue = Float.MIN_VALUE
+
+        Log.d(TAG, "DEBUG: Decoding single character from ${floatArray.size} probabilities")
+
+        // Find the character with highest probability
+        for (charIndex in 0 until floatArray.size) {
+            if (floatArray[charIndex] > maxValue) {
+                maxValue = floatArray[charIndex]
+                maxIndex = charIndex
+            }
+        }
+
+        Log.d(TAG, "DEBUG: Max index = $maxIndex, max value = $maxValue")
+
+        // CTC decoding: skip blank token
+        if (maxIndex != BLANK_INDEX) {
+            // Convert character index to actual character
+            val charPos = maxIndex - 1
+            if (charPos >= 0 && charPos < CHARACTERS.length) {
+                val result = CHARACTERS[charPos].toString()
+                Log.d(TAG, "DEBUG: Detected character '$result' (index: $maxIndex, confidence: $maxValue)")
+                return result
+            } else if (maxIndex > 0) {
+                Log.w(TAG, "Character index out of bounds: $charPos")
+            }
+        }
+
+        Log.d(TAG, "DEBUG: No character detected or blank token (index: $maxIndex)")
+        return "No text detected"
     }
 
     private fun decodeCtcOutput3D(floatArray: FloatArray, timeSteps: Int, numClasses: Int): String {
