@@ -35,7 +35,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val IMAGE_WIDTH = 160
+        private const val IMAGE_WIDTH = 1024
         private const val IMAGE_HEIGHT = 64
 
         // Characters exactly as in Python: string.ascii_letters + string.digits + " -'.,:"
@@ -58,6 +58,13 @@ class MainActivity : ComponentActivity() {
         try {
             tflite = Interpreter(loadModelFile())
             Log.d(TAG, "✅ TensorFlow Lite Interpreter loaded successfully")
+
+            // Log input and output tensor shapes
+            val inputShape = tflite.getInputTensor(0).shape()
+            val outputShape = tflite.getOutputTensor(0).shape()
+            Log.d(TAG, "📊 TFLite input shape: ${inputShape.contentToString()}")
+            Log.d(TAG, "📊 TFLite output shape: ${outputShape.contentToString()}")
+
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to load TensorFlow Lite model", e)
             Toast.makeText(this, "Failed to load OCR model", Toast.LENGTH_LONG).show()
@@ -154,13 +161,11 @@ class MainActivity : ComponentActivity() {
 
             // 🔥 FIX: Force the correct output shape based on your Python model
             // Your model should output [1, 40, 69] (time_steps = 40, num_classes = 69)
-            val expectedOutputShape = intArrayOf(1, 40, 69)
-            val outputBuffer = TensorBuffer.createFixedSize(expectedOutputShape, DataType.FLOAT32)
+            val outputShape = tflite.getOutputTensor(0).shape()
+            Log.d(TAG, "Actual output shape: ${outputShape.contentToString()}")
+            val outputBuffer = TensorBuffer.createFixedSize(outputShape, DataType.FLOAT32)
 
-            Log.d(
-                TAG,
-                "STEP 5: Using forced output shape: ${expectedOutputShape.contentToString()}"
-            )
+            Log.d(TAG, "STEP 5: Using model output shape: ${outputShape.contentToString()}")
             Log.d(TAG, "STEP 6: Output buffer size: ${outputBuffer.flatSize} elements")
             Log.d(TAG, "STEP 7: Output buffer bytes: ${outputBuffer.flatSize * 4} bytes")
 
@@ -173,7 +178,7 @@ class MainActivity : ComponentActivity() {
             tflite.run(inputBuffer, outputBuffer.buffer.rewind())
             Log.d(TAG, "STEP 9: Inference completed successfully")
 
-            val ocrText = decodeOutput(outputBuffer, expectedOutputShape)
+            val ocrText = decodeOutput(outputBuffer, outputShape)
             Log.d(TAG, "STEP 10: Decoded text = $ocrText")
 
             txtResult.text = "Result: $ocrText"
@@ -214,15 +219,19 @@ class MainActivity : ComponentActivity() {
     }
 
     // FLEXIBLE CTC DECODING
+    // ...existing code...
+
     private fun decodeOutput(tensor: TensorBuffer, shape: IntArray): String {
         val floatArray = tensor.floatArray
 
         Log.d(TAG, "DEBUG: Output shape = ${shape.contentToString()}")
         Log.d(TAG, "DEBUG: Output elements = ${floatArray.size}")
 
-        // Handle the expected shape [1, 40, 69]
-        if (shape.size == 3 && shape[0] == 1 && shape[1] == 40 && shape[2] == 69) {
-            return decodeCtcOutput3D(floatArray, 40, 69)
+        // Handle any shape [1, timeSteps, numClasses]
+        if (shape.size == 3 && shape[0] == 1 && shape[2] == CHARACTERS.length + 1) {
+            val timeSteps = shape[1]
+            val numClasses = shape[2]
+            return decodeCtcOutput3D(floatArray, timeSteps, numClasses)
         } else {
             return "Unexpected shape: ${shape.contentToString()}"
         }
