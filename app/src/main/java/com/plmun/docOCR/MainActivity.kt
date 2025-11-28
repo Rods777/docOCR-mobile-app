@@ -35,11 +35,12 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val IMAGE_WIDTH = 1024
+        private const val IMAGE_WIDTH = 160
         private const val IMAGE_HEIGHT = 64
 
         // Characters exactly as in Python: string.ascii_letters + string.digits + " -'.,:"
-        private val CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -'.,:"
+        private val CHARACTERS =
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -'.,:"
 
         private const val BLANK_INDEX = 0  // Blank token is at index 0
     }
@@ -155,41 +156,37 @@ class MainActivity : ComponentActivity() {
             val inputBuffer = convertBitmapToByteBuffer(resized)
             Log.d(TAG, "STEP 3: Input buffer size: ${inputBuffer.capacity()} bytes")
 
-            // 🔥 SIMPLE FIX: Let TFLite handle output allocation automatically
-            val outputMap = HashMap<Int, Any>()
-
-            // Get output tensor to determine the shape
+            // Get output tensor shape
             val outputTensor = tflite.getOutputTensor(0)
-            val outputShape = outputTensor.shape()
+            val outputShape = outputTensor.shape() // [1, time_steps, num_classes]
             val outputDataType = outputTensor.dataType()
 
             Log.d(TAG, "Output tensor shape: ${outputShape.contentToString()}")
             Log.d(TAG, "Output tensor bytes: ${outputTensor.numBytes()}")
 
-            // Create output array with correct size
-            val outputArray = Array(1) { Array(outputShape[1]) { FloatArray(outputShape[2]) } }
-            outputMap[0] = outputArray
+            // Allocate output array with correct shape
+            val batchSize = outputShape[0]
+            val timeSteps = outputShape[1]
+            val numClasses = outputShape[2]
+            val outputArray = Array(batchSize) { Array(timeSteps) { FloatArray(numClasses) } }
 
             Log.d(TAG, "STEP 4: Output array dimensions: ${outputArray.size}x${outputArray[0].size}x${outputArray[0][0].size}")
 
             // Run inference
             Log.d(TAG, "STEP 5: Running inference...")
-            tflite.runForMultipleInputsOutputs(arrayOf<Any>(inputBuffer), outputMap)
+            tflite.run(inputBuffer, outputArray)
             Log.d(TAG, "STEP 6: Inference completed successfully")
 
-            // Flatten the output for decoding
-            val flatOutput = FloatArray(outputShape[1] * outputShape[2])
+            // Flatten output for decoding
+            val flatOutput = FloatArray(timeSteps * numClasses)
             var index = 0
-            for (i in outputArray[0].indices) {
-                for (j in outputArray[0][i].indices) {
+            for (i in 0 until timeSteps) {
+                for (j in 0 until numClasses) {
                     flatOutput[index++] = outputArray[0][i][j]
                 }
             }
 
-            val tensorBuffer = TensorBuffer.createFixedSize(outputShape, DataType.FLOAT32)
-            tensorBuffer.loadArray(flatOutput)
-
-            val ocrText = decodeOutput(tensorBuffer, outputShape)
+            val ocrText = decodeCtcOutput3D(flatOutput, timeSteps, numClasses)
             Log.d(TAG, "STEP 7: Decoded text = $ocrText")
 
             txtResult.text = "Result: $ocrText"
@@ -208,22 +205,16 @@ class MainActivity : ComponentActivity() {
         val buffer = ByteBuffer.allocateDirect(1 * IMAGE_HEIGHT * IMAGE_WIDTH * 1 * 4)
         buffer.order(ByteOrder.nativeOrder())
 
-        val pixels = IntArray(IMAGE_HEIGHT * IMAGE_WIDTH)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-
-        for (pixel in pixels) {
-            // This matches your Python: cv2.imread(..., IMREAD_GRAYSCALE)
-            val r = (pixel shr 16 and 0xFF)
-            val g = (pixel shr 8 and 0xFF)
-            val b = (pixel and 0xFF)
-
-            // This matches OpenCV's grayscale conversion
-            val gray = (0.299f * r + 0.587f * g + 0.114f * b)
-
-            // This matches your Python: img / 255.0
-            val normalized = gray / 255.0f
-
-            buffer.putFloat(normalized)
+        for (y in 0 until IMAGE_HEIGHT) {
+            for (x in 0 until IMAGE_WIDTH) {
+                val pixel = bitmap.getPixel(x, y)
+                val r = (pixel shr 16 and 0xFF)
+                val g = (pixel shr 8 and 0xFF)
+                val b = (pixel and 0xFF)
+                val gray = (0.299f * r + 0.587f * g + 0.114f * b)
+                val normalized = gray / 255.0f
+                buffer.putFloat(normalized)
+            }
         }
         buffer.rewind()
         return buffer
@@ -274,7 +265,10 @@ class MainActivity : ComponentActivity() {
             val charPos = maxIndex - 1
             if (charPos >= 0 && charPos < CHARACTERS.length) {
                 val result = CHARACTERS[charPos].toString()
-                Log.d(TAG, "DEBUG: Detected character '$result' (index: $maxIndex, confidence: $maxValue)")
+                Log.d(
+                    TAG,
+                    "DEBUG: Detected character '$result' (index: $maxIndex, confidence: $maxValue)"
+                )
                 return result
             } else if (maxIndex > 0) {
                 Log.w(TAG, "Character index out of bounds: $charPos")
@@ -291,12 +285,10 @@ class MainActivity : ComponentActivity() {
 
         Log.d(TAG, "DEBUG: Decoding $timeSteps time steps with $numClasses classes")
 
-        // Iterate through each time step
         for (timeStep in 0 until timeSteps) {
             var maxIndex = -1
             var maxValue = Float.MIN_VALUE
 
-            // Find the character with highest probability at this time step
             for (charIndex in 0 until numClasses) {
                 val arrayIndex = timeStep * numClasses + charIndex
                 if (arrayIndex < floatArray.size && floatArray[arrayIndex] > maxValue) {
@@ -307,7 +299,6 @@ class MainActivity : ComponentActivity() {
 
             // CTC decoding: remove blanks and consecutive duplicates
             if (maxIndex != BLANK_INDEX && maxIndex != lastIndex) {
-                // Convert character index to actual character
                 val charPos = maxIndex - 1
                 if (charPos >= 0 && charPos < CHARACTERS.length) {
                     decodedText.append(CHARACTERS[charPos])
