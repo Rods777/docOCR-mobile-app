@@ -6,16 +6,17 @@ import android.content.Intent
 import android.content.res.AssetFileDescriptor
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.os.Bundle
 import android.provider.MediaStore
 import android.util.Log
+import android.widget.Button
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
-import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import java.io.FileInputStream
 import java.nio.ByteBuffer
@@ -24,39 +25,36 @@ import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var imgPreview: ImageView
+    private lateinit var imgDefault: ImageView
     private lateinit var txtUpload: TextView
     private lateinit var txtCapture: TextView
+    private lateinit var btnPredict: Button
     private lateinit var txtResult: TextView
+    private lateinit var txtAccuracy: TextView
     private lateinit var tflite: Interpreter
+
+    private var currentBitmap: Bitmap? = null
 
     companion object {
         private const val TAG = "MainActivity"
         private const val IMAGE_WIDTH = 160
         private const val IMAGE_HEIGHT = 64
+        private const val TIME_STEPS = 20
+        private const val NUM_CLASSES = 69
 
-        // 78 medical terms (from your Python list)
-        private val MEDICAL_TERMS = arrayOf(
-            "Aceta", "Ace", "Alatrol", "Amodis", "Atrizin", "Axodin", "Azithrocin",
-            "Azyth", "Az", "Bacaid", "Backtone", "Baclofen", "Baclon", "Bacmax",
-            "Beklo", "Bicozin", "Canazole", "Candinil", "Cetisoft", "Conaz", "Dancel",
-            "Denixil", "Diflu", "Dinafex", "Disopan", "Esonix", "Esoral", "Etizin",
-            "Exium", "Fenadin", "Fexofast", "Fexo", "Filmet", "Fixal", "Flamyd",
-            "Flexibac", "Flexilax", "Flugal", "Ketocon", "Ketoral", "Ketotab",
-            "Ketozol", "Leptic", "Lucan-R", "Lumona", "M-Kast", "Maxima", "Maxpro",
-            "Metro", "Metsina", "Monas", "Montair", "Montene", "Montex", "Napa Extend",
-            "Napa", "Nexcap", "Nexum", "Nidazyl", "Nizoder", "Odmon", "Omastin",
-            "Opton", "Progut", "Provair", "Renova", "Rhinil", "Ritch", "Rivotril",
-            "Romycin", "Rozith", "Sergel", "Tamen", "Telfast", "Tridosil", "Trilock",
-            "Vifas", "Zithrin"
-        )
+        // Full character set from Python
+        private val CHARACTERS = (
+                "abcdefghijklmnopqrstuvwxyz" +
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
+                        "0123456789" +
+                        " -'.,:"
+                ).substring(0, NUM_CLASSES - 1)  // Use first 68 characters
 
-        // Fuzzy-match threshold (0.0 - 1.0). If no close match above threshold, fall back to raw predicted token.
-        private const val FUZZY_THRESHOLD = 0.35
+        private const val BLANK_TOKEN = NUM_CLASSES - 1
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -65,35 +63,53 @@ class MainActivity : ComponentActivity() {
         setContentView(R.layout.activity_main)
 
         imgPreview = findViewById(R.id.img_preview)
+        imgDefault = findViewById(R.id.img_default)
         txtUpload = findViewById(R.id.txt_upload)
         txtCapture = findViewById(R.id.txt_capture)
+        btnPredict = findViewById(R.id.btn_predict)
         txtResult = findViewById(R.id.txt_result)
+        txtAccuracy = findViewById(R.id.textView5)
+
+        // Initialize with default state
+        resetPredictionResults()
 
         // Load TFLite model
         try {
             tflite = Interpreter(loadModelFile())
             Log.d(TAG, "✅ TensorFlow Lite Interpreter loaded successfully")
 
-            // Log input and output tensor shapes & datatypes
-            val inTensor = tflite.getInputTensor(0)
-            val outTensor = tflite.getOutputTensor(0)
+            val inputTensor = tflite.getInputTensor(0)
+            Log.d(TAG, "📊 Model information:")
+            Log.d(TAG, "  Input shape: ${inputTensor.shape().contentToString()}")
+            Log.d(TAG, "  Expected output: [1, $TIME_STEPS, $NUM_CLASSES]")
 
-            Log.d(TAG, "📊 TFLite input shape: ${inTensor.shape().contentToString()} dtype=${inTensor.dataType()}")
-            Log.d(TAG, "📊 TFLite output shape: ${outTensor.shape().contentToString()} dtype=${outTensor.dataType()} bytes=${outTensor.numBytes()}")
+            // Test the model
+            testModelWithDummyInput()
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to load TensorFlow Lite model", e)
             Toast.makeText(this, "Failed to load OCR model", Toast.LENGTH_LONG).show()
         }
 
+        // Upload button click - only uploads/previews image
         txtUpload.setOnClickListener {
             val intent = Intent(Intent.ACTION_PICK)
             intent.type = "image/*"
             galleryLauncher.launch(intent)
         }
 
+        // Capture button click - only captures/previews image
         txtCapture.setOnClickListener {
             requestCameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+
+        // Predict button click - processes the uploaded/captured image
+        btnPredict.setOnClickListener {
+            currentBitmap?.let {
+                runOcr(it)
+            } ?: run {
+                Toast.makeText(this, "Please upload or capture an image first", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -103,12 +119,53 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadModelFile(): MappedByteBuffer {
-        val fileDescriptor: AssetFileDescriptor = assets.openFd("ml/CNN_BiLSTM_v2fp16.tflite")
+        val fileDescriptor: AssetFileDescriptor = assets.openFd("ml/ocr_model_production_fp16.tflite")
         val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
         val fileChannel = inputStream.channel
         val startOffset = fileDescriptor.startOffset
         val declaredLength = fileDescriptor.declaredLength
         return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+    }
+
+    private fun testModelWithDummyInput() {
+        try {
+            val dummyBuffer = ByteBuffer.allocateDirect(1 * IMAGE_HEIGHT * IMAGE_WIDTH * 1 * 4)
+            dummyBuffer.order(ByteOrder.nativeOrder())
+            for (i in 0 until IMAGE_HEIGHT * IMAGE_WIDTH) {
+                dummyBuffer.putFloat(1.0f)
+            }
+            dummyBuffer.rewind()
+
+            val output = Array(1) { Array(TIME_STEPS) { FloatArray(NUM_CLASSES) } }
+            tflite.run(dummyBuffer, output)
+
+            Log.d(TAG, "✅ Model test successful")
+            Log.d(TAG, "Output shape confirmed: 1 x $TIME_STEPS x $NUM_CLASSES")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Model test failed", e)
+        }
+    }
+
+    private fun resetPredictionResults() {
+        runOnUiThread {
+            txtResult.text = "No prediction yet"
+            txtAccuracy.text = "0%"
+            btnPredict.isEnabled = false
+        }
+    }
+
+    private fun updateImagePreview(bitmap: Bitmap) {
+        runOnUiThread {
+            imgDefault.visibility = ImageView.GONE
+            imgPreview.visibility = ImageView.VISIBLE
+            imgPreview.setImageBitmap(bitmap)
+            btnPredict.isEnabled = true
+
+            // Reset prediction results when new image is loaded
+            txtResult.text = "Ready for prediction"
+            txtAccuracy.text = "0%"
+        }
     }
 
     private val requestCameraPermissionLauncher = registerForActivityResult(
@@ -128,12 +185,12 @@ class MainActivity : ComponentActivity() {
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             val uri = result.data?.data
-            imgPreview.setImageURI(uri)
             try {
                 val stream = contentResolver.openInputStream(uri!!)
                 val bitmap = BitmapFactory.decodeStream(stream)
                 stream?.close()
-                runOcr(bitmap)
+                currentBitmap = bitmap
+                updateImagePreview(bitmap)
             } catch (e: Exception) {
                 Log.e(TAG, "Error loading image from gallery", e)
                 Toast.makeText(this, "Error loading image", Toast.LENGTH_SHORT).show()
@@ -147,113 +204,96 @@ class MainActivity : ComponentActivity() {
         if (result.resultCode == Activity.RESULT_OK) {
             val bmp = result.data?.extras?.get("data") as? Bitmap
             if (bmp != null) {
-                imgPreview.setImageBitmap(bmp)
-                runOcr(bmp)
+                currentBitmap = bmp
+                updateImagePreview(bmp)
             } else {
                 Toast.makeText(this, "Error capturing image", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    // ----------------------------
-    // RUN INFERENCE: classification-ready for your model
-    // ----------------------------
     private fun runOcr(bitmap: Bitmap) {
         try {
-            Log.d(TAG, "STEP 1: runOcr started")
+            Log.d(TAG, "STEP 1: Starting OCR processing")
 
-            // Resize bitmap to model input
-            val resized = Bitmap.createScaledBitmap(bitmap, IMAGE_WIDTH, IMAGE_HEIGHT, true)
-            Log.d(TAG, "STEP 2: Bitmap resized: ${resized.width}x${resized.height}")
-
-            // Convert to ByteBuffer
-            val inputBuffer = convertBitmapToByteBuffer(resized)
-            Log.d(TAG, "STEP 3: Input buffer size: ${inputBuffer.capacity()} bytes")
-
-            // Get output tensor info
-            val outputTensor = tflite.getOutputTensor(0)
-            val outputShape = outputTensor.shape()
-            val numClasses = if (outputShape.size >= 2) outputShape[1] else 0
-
-            if (numClasses > 0) {
-                // Allocate Float32 output buffer
-                val outputBuffer = ByteBuffer.allocateDirect(numClasses * 4)
-                outputBuffer.order(ByteOrder.nativeOrder())
-
-                // Run inference
-                tflite.run(inputBuffer, outputBuffer)
-                outputBuffer.rewind()
-
-                // Read floats
-                val outputFloats = FloatArray(numClasses)
-                for (i in 0 until numClasses) outputFloats[i] = outputBuffer.float
-
-                // Get top 3 indices
-                val top3 = outputFloats
-                    .mapIndexed { index, value -> index to value }
-                    .sortedByDescending { it.second }
-                    .take(3)
-
-                // Prepare result string
-                val resultText = top3.joinToString(separator = "\n") { (index, value) ->
-                    val term = if (index in MEDICAL_TERMS.indices) MEDICAL_TERMS[index] else "Unknown"
-                    "Prediction: $term | Confidence: ${"%.4f".format(value)}"
-                }
-
-                txtResult.text = resultText
-                return
+            // Show processing message
+            runOnUiThread {
+                txtResult.text = "Processing..."
+                txtAccuracy.text = "0%"
+                btnPredict.isEnabled = false
             }
 
-            txtResult.text = "Unexpected model output shape: ${outputShape.contentToString()}"
-            Log.e(TAG, "Unexpected model output shape: ${outputShape.contentToString()}")
+            // Preprocess image
+            val grayBitmap = convertToGrayscale(bitmap)
+            val resized = Bitmap.createScaledBitmap(grayBitmap, IMAGE_WIDTH, IMAGE_HEIGHT, true)
+            val inputBuffer = convertBitmapToByteBuffer(resized)
+
+            // Create output buffer
+            val output = Array(1) { Array(TIME_STEPS) { FloatArray(NUM_CLASSES) } }
+
+            // Run inference
+            tflite.run(inputBuffer, output)
+            Log.d(TAG, "STEP 2: Inference completed")
+
+            // Decode CTC output
+            val decodedText = decodeCtcOutput(output[0])
+            Log.d(TAG, "STEP 3: Decoded text: '$decodedText' (${decodedText.length} chars)")
+
+            // Calculate confidence
+            val confidence = calculateConfidence(output[0])
+
+            // Display results
+            runOnUiThread {
+                txtResult.text = if (decodedText.isNotEmpty()) decodedText else "No text detected"
+                txtAccuracy.text = "${String.format("%.0f", confidence)}%"
+                btnPredict.isEnabled = true
+
+                val message = if (decodedText.isNotEmpty()) {
+                    "Prediction completed: $decodedText (${String.format("%.1f", confidence)}%)"
+                } else {
+                    "No text detected in the image"
+                }
+                Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+            }
 
         } catch (e: Exception) {
             Log.e(TAG, "OCR Error", e)
             runOnUiThread {
                 Toast.makeText(this, "OCR Error: ${e.message}", Toast.LENGTH_LONG).show()
                 txtResult.text = "Error: ${e.message}"
+                txtAccuracy.text = "0%"
+                btnPredict.isEnabled = true
             }
         }
     }
 
-
-    // Convert a bitmap (already resized to IMAGE_WIDTH x IMAGE_HEIGHT) into a ByteBuffer that matches your Python preprocessing:
-    // 1) convert to grayscale [0..1]
-    // 2) compute per-image mean/std
-    // 3) apply z-score normalization (value - mean) / std
-    private fun convertBitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
-        // Expect bitmap size equals IMAGE_WIDTH x IMAGE_HEIGHT
+    private fun convertToGrayscale(bitmap: Bitmap): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
+        val grayBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
 
-        // Allocate buffer for float32 (1 x H x W x 1)
+        for (x in 0 until width) {
+            for (y in 0 until height) {
+                val pixel = bitmap.getPixel(x, y)
+                val r = Color.red(pixel)
+                val g = Color.green(pixel)
+                val b = Color.blue(pixel)
+                val gray = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+                grayBitmap.setPixel(x, y, Color.rgb(gray, gray, gray))
+            }
+        }
+        return grayBitmap
+    }
+
+    private fun convertBitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
         val buffer = ByteBuffer.allocateDirect(1 * IMAGE_HEIGHT * IMAGE_WIDTH * 1 * 4)
         buffer.order(ByteOrder.nativeOrder())
 
-        val grayValues = FloatArray(width * height)
-        var p = 0
-        for (y in 0 until height) {
-            for (x in 0 until width) {
+        for (y in 0 until IMAGE_HEIGHT) {
+            for (x in 0 until IMAGE_WIDTH) {
                 val pixel = bitmap.getPixel(x, y)
-                val r = (pixel shr 16) and 0xFF
-                val g = (pixel shr 8) and 0xFF
-                val b = pixel and 0xFF
-                val gray = (0.299f * r + 0.587f * g + 0.114f * b)
-                grayValues[p++] = gray / 255f
-            }
-        }
-
-        // mean and std (per-image)
-        val mean = grayValues.average().toFloat()
-        val variance = if (grayValues.isNotEmpty()) grayValues.map { (it - mean) * (it - mean) }.average().toFloat() else 0f
-        val std = sqrt(variance)
-        val stdSafe = if (std < 1e-6f) 1e-6f else std
-
-        // write normalized floats (row-major)
-        p = 0
-        for (y in 0 until height) {
-            for (x in 0 until width) {
-                val normalized = (grayValues[p++] - mean) / stdSafe
+                val gray = Color.red(pixel)
+                val normalized = gray / 255.0f
                 buffer.putFloat(normalized)
             }
         }
@@ -261,75 +301,50 @@ class MainActivity : ComponentActivity() {
         return buffer
     }
 
-    // ---------- Fuzzy matching utilities (pure Kotlin) ----------
-
-    // Return the closest term from MEDICAL_TERMS to `word` using normalized Levenshtein similarity
-    private fun findClosestTerm(word: String): String {
-        var bestTerm = word
-        var bestScore = -1.0
-        for (term in MEDICAL_TERMS) {
-            val score = similarityScore(word, term)
-            if (score > bestScore) {
-                bestScore = score
-                bestTerm = term
-            }
-        }
-        return bestTerm
-    }
-
-    // Normalized similarity score in [0..1] based on Levenshtein distance
-    private fun similarityScore(a: String, b: String): Double {
-        if (a.isEmpty() && b.isEmpty()) return 1.0
-        if (a.isEmpty() || b.isEmpty()) return 0.0
-        val dist = levenshtein(a.lowercase(), b.lowercase())
-        val maxLen = max(a.length, b.length)
-        return 1.0 - (dist.toDouble() / maxLen.toDouble())
-    }
-
-    // Levenshtein distance (iterative DP)
-    private fun levenshtein(s: String, t: String): Int {
-        val n = s.length
-        val m = t.length
-        if (n == 0) return m
-        if (m == 0) return n
-
-        val v0 = IntArray(m + 1) { it }    // previous row
-        val v1 = IntArray(m + 1)          // current row
-
-        for (i in 0 until n) {
-            v1[0] = i + 1
-            val si = s[i]
-            for (j in 0 until m) {
-                val cost = if (si == t[j]) 0 else 1
-                v1[j + 1] = min(min(v1[j] + 1, v0[j + 1] + 1), v0[j] + cost)
-            }
-            // copy v1 to v0
-            for (j in 0..m) v0[j] = v1[j]
-        }
-        return v1[m]
-    }
-
-    // Placeholder for your previous CTC decode if you ever switch to a sequence model
-    private fun decodeCtcOutput3D(floatArray: FloatArray, timeSteps: Int, numClasses: Int): String {
-        // Basic greedy decoding similar to your earlier implementation
+    private fun decodeCtcOutput(output: Array<FloatArray>): String {
         val decoded = StringBuilder()
         var lastIndex = -1
-        for (t in 0 until timeSteps) {
-            var maxIdx = -1
-            var maxVal = Float.MIN_VALUE
-            for (c in 0 until numClasses) {
-                val idx = t * numClasses + c
-                if (idx < floatArray.size && floatArray[idx] > maxVal) {
-                    maxVal = floatArray[idx]
-                    maxIdx = c
+
+        for (t in 0 until TIME_STEPS) {
+            var maxIndex = 0
+            var maxProb = -1f
+
+            for (c in 0 until NUM_CLASSES) {
+                if (output[t][c] > maxProb) {
+                    maxProb = output[t][c]
+                    maxIndex = c
                 }
             }
-            if (maxIdx != -1 && maxIdx != lastIndex && maxIdx > 0) {
-                // Note: this assumes a separate mapping - not used for current classifier model
-                decoded.append("?") // replace with actual char mapping if you change model
+
+            if (maxIndex != BLANK_TOKEN && maxIndex != lastIndex) {
+                if (maxIndex < CHARACTERS.length) {
+                    decoded.append(CHARACTERS[maxIndex])
+                    Log.d(TAG, "  Time $t: Added '${CHARACTERS[maxIndex]}' (prob=${String.format("%.3f", maxProb)})")
+                }
+                lastIndex = maxIndex
+            } else if (maxIndex == BLANK_TOKEN) {
+                lastIndex = -1
+                Log.d(TAG, "  Time $t: Blank token (prob=${String.format("%.3f", maxProb)})")
+            } else {
+                Log.d(TAG, "  Time $t: Duplicate '${CHARACTERS[maxIndex]}', skipped")
             }
-            lastIndex = maxIdx
         }
-        return decoded.toString()
+
+        val result = decoded.toString().trim()
+        Log.d(TAG, "Final decoded text: '$result' (${result.length} characters)")
+        return result
+    }
+
+    private fun calculateConfidence(output: Array<FloatArray>): Float {
+        var totalConfidence = 0f
+        var count = 0
+
+        for (t in 0 until TIME_STEPS) {
+            val maxProb = output[t].maxOrNull() ?: 0f
+            totalConfidence += maxProb
+            count++
+        }
+
+        return if (count > 0) (totalConfidence / count) * 100 else 0f
     }
 }

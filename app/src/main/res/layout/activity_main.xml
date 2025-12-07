@@ -36,7 +36,6 @@
             app:layout_constraintEnd_toEndOf="parent"/>
 
         <!-- Upload & Image container -->
-
         <androidx.constraintlayout.widget.ConstraintLayout
             android:id="@+id/frameUpload"
             android:layout_width="0dp"
@@ -79,11 +78,11 @@
                     android:layout_width="match_parent"
                     android:layout_height="match_parent"
                     android:adjustViewBounds="true"
-                    android:scaleType="fitCenter" />
+                    android:scaleType="fitCenter"
+                    android:visibility="gone" />
             </FrameLayout>
 
             <!-- Upload & Capture buttons -->
-
             <TextView
                 android:id="@+id/txt_upload"
                 android:layout_width="wrap_content"
@@ -113,7 +112,6 @@
                 app:layout_constraintTop_toTopOf="@id/txt_upload" />
 
             <!-- Predict button -->
-
             <Button
                 android:id="@+id/btn_predict"
                 android:layout_width="196dp"
@@ -123,6 +121,7 @@
                 android:fontFamily="@font/poppins_bold"
                 android:text="Predict"
                 android:textColor="@color/white"
+                android:enabled="false"
                 app:layout_constraintBottom_toBottomOf="parent"
                 app:layout_constraintEnd_toEndOf="parent"
                 app:layout_constraintStart_toStartOf="parent"
@@ -131,7 +130,6 @@
         </androidx.constraintlayout.widget.ConstraintLayout>
 
         <!-- Prediction headers -->
-
         <TextView
             android:id="@+id/textView2"
             android:layout_width="wrap_content"
@@ -147,7 +145,7 @@
             android:id="@+id/textView3"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Accuracy"
+            android:text="Confidence"
             android:textColor="#cbcdd6"
             android:fontFamily="@font/poppins_regular"
             app:layout_constraintTop_toTopOf="@id/textView2"
@@ -164,30 +162,27 @@
             app:layout_constraintEnd_toEndOf="@id/frameUpload"/>
 
         <!-- Prediction results -->
-
         <TextView
             android:id="@+id/txt_result"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
             android:fontFamily="@font/poppins_medium"
-            android:text="Parasatukmol"
+            android:text="No prediction yet"
             android:textColor="@color/white"
             app:layout_constraintStart_toStartOf="@id/frameUpload"
-            app:layout_constraintTop_toBottomOf="@id/textView2" />
+            app:layout_constraintTop_toBottomOf="@+id/textView2"
+            app:layout_constraintEnd_toStartOf="@+id/textView5" />
 
         <TextView
             android:id="@+id/textView5"
-            android:layout_width="0dp"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="84%"
+            android:text="0%"
             android:textColor="@color/white"
-            android:textAlignment="textEnd"
             android:fontFamily="@font/poppins_medium"
             app:layout_constraintTop_toTopOf="@id/txt_result"
             app:layout_constraintEnd_toEndOf="@id/frameUpload"/>
-
-        <!-- Other predictions -->
 
         <!-- Footer -->
         <TextView
@@ -201,6 +196,5 @@
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent"/>
-
     </androidx.constraintlayout.widget.ConstraintLayout>
 </androidx.constraintlayout.widget.ConstraintLayout>
