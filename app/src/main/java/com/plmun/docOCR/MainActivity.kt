@@ -26,6 +26,24 @@ import java.nio.channels.FileChannel
 import kotlin.math.max
 import kotlin.math.min
 
+// Add this class to track performance metrics
+class PerformanceTracker {
+    private val timings = mutableMapOf<String, Long>()
+
+    fun startTimer(key: String) {
+        timings[key] = System.currentTimeMillis()
+    }
+
+    fun stopTimer(key: String): Long {
+        val startTime = timings[key] ?: return 0
+        return System.currentTimeMillis() - startTime
+    }
+
+    fun logMetric(tag: String, metric: String, value: Any) {
+        Log.d(tag, "📊 $metric: $value")
+    }
+}
+
 class MainActivity : ComponentActivity() {
 
     private lateinit var imgPreview: ImageView
@@ -213,8 +231,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun runOcr(bitmap: Bitmap) {
+        val tracker = PerformanceTracker()
+
         try {
+            tracker.startTimer("total_ocr")
             Log.d(TAG, "STEP 1: Starting OCR processing")
+
+            // Track memory before processing
+            val runtime = Runtime.getRuntime()
+            val memoryBefore = runtime.totalMemory() - runtime.freeMemory()
+            tracker.logMetric(TAG, "Memory before", "${memoryBefore / 1024} KB")
 
             // Show processing message
             runOnUiThread {
@@ -223,24 +249,45 @@ class MainActivity : ComponentActivity() {
                 btnPredict.isEnabled = false
             }
 
-            // Preprocess image
+            // Preprocess image with timing
+            tracker.startTimer("preprocessing")
             val grayBitmap = convertToGrayscale(bitmap)
             val resized = Bitmap.createScaledBitmap(grayBitmap, IMAGE_WIDTH, IMAGE_HEIGHT, true)
             val inputBuffer = convertBitmapToByteBuffer(resized)
+            val preprocessTime = tracker.stopTimer("preprocessing")
+            tracker.logMetric(TAG, "Preprocess time", "${preprocessTime}ms")
 
             // Create output buffer
             val output = Array(1) { Array(TIME_STEPS) { FloatArray(NUM_CLASSES) } }
 
-            // Run inference
+            // Run inference with timing
+            tracker.startTimer("inference")
             tflite.run(inputBuffer, output)
+            val inferenceTime = tracker.stopTimer("inference")
+            tracker.logMetric(TAG, "Inference time", "${inferenceTime}ms")
             Log.d(TAG, "STEP 2: Inference completed")
 
             // Decode CTC output
+            tracker.startTimer("decoding")
             val decodedText = decodeCtcOutput(output[0])
+            val decodeTime = tracker.stopTimer("decoding")
+            tracker.logMetric(TAG, "Decode time", "${decodeTime}ms")
             Log.d(TAG, "STEP 3: Decoded text: '$decodedText' (${decodedText.length} chars)")
 
             // Calculate confidence
             val confidence = calculateConfidence(output[0])
+
+            // Track memory after processing
+            val memoryAfter = runtime.totalMemory() - runtime.freeMemory()
+            val memoryUsed = memoryAfter - memoryBefore
+            tracker.logMetric(TAG, "Memory used", "${memoryUsed / 1024} KB")
+
+            val totalTime = tracker.stopTimer("total_ocr")
+            tracker.logMetric(TAG, "Total OCR time", "${totalTime}ms")
+
+            // Fix the FPS calculation - use Double for division
+            val fps = if (totalTime > 0) 1000.0 / totalTime else 0.0
+            tracker.logMetric(TAG, "FPS", "${String.format("%.2f", fps)}")
 
             // Display results
             runOnUiThread {
@@ -249,7 +296,7 @@ class MainActivity : ComponentActivity() {
                 btnPredict.isEnabled = true
 
                 val message = if (decodedText.isNotEmpty()) {
-                    "Prediction completed: $decodedText (${String.format("%.1f", confidence)}%)"
+                    "Prediction: $decodedText (${String.format("%.1f", confidence)}%) in ${totalTime}ms"
                 } else {
                     "No text detected in the image"
                 }
@@ -268,21 +315,36 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun convertToGrayscale(bitmap: Bitmap): Bitmap {
+        val startTime = System.currentTimeMillis()
+
+        // Use ARGB_8888 for better performance
         val width = bitmap.width
         val height = bitmap.height
-        val grayBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(width * height)
 
-        for (x in 0 until width) {
-            for (y in 0 until height) {
-                val pixel = bitmap.getPixel(x, y)
-                val r = Color.red(pixel)
-                val g = Color.green(pixel)
-                val b = Color.blue(pixel)
-                val gray = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
-                grayBitmap.setPixel(x, y, Color.rgb(gray, gray, gray))
-            }
+        // Get all pixels at once (FAST)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        // Process pixels in bulk
+        for (i in pixels.indices) {
+            val pixel = pixels[i]
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+
+            // Fast grayscale conversion
+            val gray = (r * 0.299 + g * 0.587 + b * 0.114).toInt()
+            pixels[i] = 0xFF000000.toInt() or (gray shl 16) or (gray shl 8) or gray
         }
-        return grayBitmap
+
+        // Create bitmap from processed pixels
+        val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        result.setPixels(pixels, 0, width, 0, 0, width, height)
+
+        val time = System.currentTimeMillis() - startTime
+        Log.d(TAG, "🔄 Grayscale conversion: ${time}ms")
+
+        return result
     }
 
     private fun convertBitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
