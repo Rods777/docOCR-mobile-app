@@ -136,13 +136,27 @@ class MainActivity : ComponentActivity() {
         if (::tflite.isInitialized) tflite.close()
     }
 
+    // -------------------- MODEL LOADER (FALLBACK) --------------------
     private fun loadModelFile(): MappedByteBuffer {
-        val fileDescriptor: AssetFileDescriptor = assets.openFd("ml/ocr_model_production_fp16.tflite")
-        val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
-        val fileChannel = inputStream.channel
-        val startOffset = fileDescriptor.startOffset
-        val declaredLength = fileDescriptor.declaredLength
-        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+        val models = listOf(
+            "ml/ocr_model_production_fp16.tflite",
+            "ml/ocr_pred_model.tflite",
+            "ml/CNN_BiLSTM_v2fp16.tflite"
+        )
+
+        for (model in models) {
+            try {
+                Log.d(TAG, "🔍 Trying model: $model")
+                val fd: AssetFileDescriptor = assets.openFd(model)
+                val inputStream = FileInputStream(fd.fileDescriptor)
+                val channel = inputStream.channel
+                Log.d(TAG, "✅ Loaded model: $model")
+                return channel.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Failed loading $model", e)
+            }
+        }
+        throw RuntimeException("No valid OCR model found")
     }
 
     private fun testModelWithDummyInput() {
